@@ -1,15 +1,11 @@
-# agent.py - Simplified for NPF Pensions, with button parsing.
 import os
 import logging
 from typing import Any, Dict, List
-
-from langgraph.prebuilt import create_react_agent
+from langgraph.prebuilt import create_agent_executor
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_openai import ChatOpenAI
 from langchain_groq import ChatGroq
 from dotenv import load_dotenv
-
-# Import the new prompt
 from prompt import PENSION_AGENT_PROMPT
 
 load_dotenv()
@@ -21,7 +17,7 @@ def _chat_llm() -> ChatOpenAI:
     """Return a streaming chat model."""
     return ChatGroq(
         api_key=os.getenv("GROQ_API_KEY"),
-        model="meta-llama/llama-4-scout-17b-16e-instruct", # Using a capable model for instruction following
+        model="meta-llama/llama-4-scout-17b-16e-instruct", 
         temperature=0.1,
     )
 
@@ -39,12 +35,10 @@ class WhatsappAgent:
         try:
             logger.info("Initializing NPF Pensions Agent (no tools)...")
             
-            # The agent is created with an empty tool list
-            self.agent = create_react_agent(
-                model=self.llm,
-                tools=[], # No tools are being used
-                prompt=PENSION_AGENT_PROMPT,
-                checkpointer=self.memory,
+            # Create a simple agent executor with no tools
+            self.agent = create_agent_executor(
+                agent_runnable=self.llm,
+                tools=[],
             )
             logger.info("NPF Pensions Agent ready with memory.")
         except Exception as e:
@@ -68,25 +62,31 @@ class WhatsappAgent:
         if not self.agent:
             raise RuntimeError("Agent not initialized. Call initialize() first.")
 
-        from langchain_core.messages import HumanMessage
+        from langchain_core.messages import HumanMessage, SystemMessage
 
-        # Create the message object based on content type
-        if isinstance(content, str):
-            message = HumanMessage(content=content)
-        elif isinstance(content, list):
-            message = HumanMessage(content=content)
-        else:
-            message = HumanMessage(content=str(content))
+        # Create the message object with system prompt and user content
+        messages = [
+            SystemMessage(content=PENSION_AGENT_PROMPT),
+            HumanMessage(content=content)
+        ]
 
         config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 100}
         response_content = ""
 
-        # Stream the agent's response
-        async for event in self.agent.astream_events({"messages": [message]}, config, version="v1"):
-            if event["event"] == "on_chat_model_stream":
-                chunk = event["data"]["chunk"]
-                if chunk.content:
-                    response_content += chunk.content
+        try:
+            # Use the agent to get response
+            result = await self.agent.ainvoke({"messages": messages}, config=config)
+            
+            # Extract the response content
+            if isinstance(result, dict) and "messages" in result:
+                last_message = result["messages"][-1]
+                response_content = last_message.content
+            else:
+                response_content = str(result)
+                
+        except Exception as e:
+            logger.error(f"Error getting agent response: {e}")
+            response_content = "I apologize, but I'm having trouble processing your request. Please try again."
         
         # Parse the response for text and buttons
         text, buttons = response_content, []

@@ -1,4 +1,3 @@
-# app.py - Integrated with button logic, STT/TTS, and NPF Pensions Agent.
 import base64
 import httpx
 from io import BytesIO
@@ -272,12 +271,12 @@ async def process_whatsapp_message(message: dict, from_number: str, user_name: s
                 audio_bytes = await text_to_speech.synthesize(response_text)
                 media_id = await upload_media_to_whatsapp(audio_bytes, "audio/mpeg")
                 if media_id:
-                    await send_audio_message(from_number, media_id)  # Actually send the audio
-                else: # Fallback to text
+                    await send_audio_message(from_number, media_id)
+                else: 
                     await send_text_message(from_number, response_text)
             except Exception as e:
                 logger.error(f"[BG] TTS or audio upload failed: {e}")
-                await send_text_message(from_number, response_text) # Fallback to text
+                await send_text_message(from_number, response_text)
         
         elif buttons:
             await send_button_message(from_number, response_text, buttons)
