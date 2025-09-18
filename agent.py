@@ -131,8 +131,6 @@ class WhatsappAgent:
             A dictionary like {"text": "Your response.", "buttons": ["Button 1", "Button 2"], "avatar_data": "base64_image_data"}
         """
         try:
-            # Use direct LLM approach for now (more reliable)
-            # The ReAct agent has parsing issues with the current LLM
             from langchain_core.messages import HumanMessage, SystemMessage
             messages = [
                 SystemMessage(content=PENSION_AGENT_PROMPT),
