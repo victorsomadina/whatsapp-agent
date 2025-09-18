@@ -5,7 +5,7 @@ langchain
 langchain-openai
 langchain-groq
 langchain-core
-langgraph
+langgraph>=0.3.0
 groq
 elevenlabs
 python-dotenv

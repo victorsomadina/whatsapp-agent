@@ -1,3 +1,4 @@
+# app.py - Integrated with button logic, STT/TTS, and NPF Pensions Agent.
 import base64
 import httpx
 from io import BytesIO
@@ -75,21 +76,53 @@ app = FastAPI(
 FB_BASE_URL = f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
 AUTH_HEADERS = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
 
-async def send_text_message(to: str, text: str):
-    """Sends a simple text message with proper formatting."""
+async def send_text_message(to: str, text: str, avatar_data: str = None):
+    """Sends a simple text message with proper formatting and optional avatar."""
     # Clean up the text formatting for WhatsApp
     formatted_text = text.replace('\\n', '\n')  # Convert escaped newlines to actual newlines
     
-    payload = {"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": formatted_text}}
+    # If avatar is provided, send image with caption
+    if avatar_data:
+        try:
+            # Upload the image first to get media ID
+            import base64
+            image_data = base64.b64decode(avatar_data)
+            media_id = await upload_media_to_whatsapp(image_data, "image/png")
+            
+            if media_id:
+                # Send image with caption
+                payload = {
+                    "messaging_product": "whatsapp",
+                    "to": to,
+                    "type": "image",
+                    "image": {
+                        "id": media_id,
+                        "caption": formatted_text
+                    }
+                }
+                logger.info(f"Sending image with caption to {to}, media_id: {media_id}")
+            else:
+                # Fallback to regular text message
+                payload = {"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": formatted_text}}
+        except Exception as e:
+            logger.error(f"Failed to send image with caption: {e}")
+            # Fallback to regular text message
+            payload = {"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": formatted_text}}
+    else:
+        # Regular text message without avatar
+        payload = {"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": formatted_text}}
+    
     async with httpx.AsyncClient() as client:
         try:
             response = await client.post(FB_BASE_URL, headers=AUTH_HEADERS, json=payload)
             response.raise_for_status()
             logger.info(f"Text message sent to {to}")
+            logger.info(f"Response: {response.text}")
         except httpx.HTTPStatusError as e:
             logger.error(f"Error sending text message: {e.response.text}")
+            logger.error(f"Payload was: {payload}")
 
-async def send_button_message(to: str, body: str, buttons: List[str]):
+async def send_button_message(to: str, body: str, buttons: List[str], avatar_data: str = None):
     """Sends an interactive message with up to 3 buttons."""
     # Validate button titles length (WhatsApp limit: 20 characters)
     validated_buttons = []
@@ -102,20 +135,42 @@ async def send_button_message(to: str, body: str, buttons: List[str]):
         else:
             validated_buttons.append(button)
     
+    # Build the interactive message payload
+    interactive_payload = {
+        "type": "button",
+        "body": {"text": body.replace('\\n', '\n')},  # Convert escaped newlines
+        "action": {
+            "buttons": [
+                {"type": "reply", "reply": {"id": f"btn_{i}", "title": btn}}
+                for i, btn in enumerate(validated_buttons)
+            ]
+        }
+    }
+    
+    # Add image header if avatar is provided
+    if avatar_data:
+        try:
+            # Upload the image first to get media ID
+            import base64
+            image_data = base64.b64decode(avatar_data)
+            media_id = await upload_media_to_whatsapp(image_data, "image/png")
+            
+            if media_id:
+                interactive_payload["header"] = {
+                    "type": "image",
+                    "image": {"id": media_id}
+                }
+                logger.info(f"Added image header to button message")
+            else:
+                logger.warning("Failed to upload avatar image for button message")
+        except Exception as e:
+            logger.error(f"Failed to embed avatar in button message: {e}")
+    
     payload = {
         "messaging_product": "whatsapp",
         "to": to,
         "type": "interactive",
-        "interactive": {
-            "type": "button",
-            "body": {"text": body.replace('\\n', '\n')},  # Convert escaped newlines
-            "action": {
-                "buttons": [
-                    {"type": "reply", "reply": {"id": f"btn_{i}", "title": btn}}
-                    for i, btn in enumerate(validated_buttons)
-                ]
-            }
-        }
+        "interactive": interactive_payload
     }
     async with httpx.AsyncClient() as client:
         try:
@@ -124,7 +179,6 @@ async def send_button_message(to: str, body: str, buttons: List[str]):
             logger.info(f"Button message sent to {to} with {len(validated_buttons)} buttons")
         except httpx.HTTPStatusError as e:
             logger.error(f"Error sending button message: {e.response.text}")
-            # Fallback to text message if button message fails
             await send_text_message(to, body)
 
 async def send_audio_message(to: str, media_id: str):
@@ -162,8 +216,25 @@ async def download_media(media_id: str) -> bytes:
 async def upload_media_to_whatsapp(media_content: bytes, mime_type: str) -> str | None:
     """Uploads media and returns the media ID."""
     upload_url = f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_NUMBER_ID}/media"
+    temp_file_path = None
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_file:
+        # Determine file suffix based on mime type
+        suffix = ".mp3"  # default
+        if mime_type.startswith("image/"):
+            if mime_type == "image/png":
+                suffix = ".png"
+            elif mime_type == "image/jpeg":
+                suffix = ".jpg"
+            elif mime_type == "image/gif":
+                suffix = ".gif"
+            else:
+                suffix = ".png"  # fallback
+        elif mime_type.startswith("audio/"):
+            suffix = ".mp3"
+        elif mime_type.startswith("video/"):
+            suffix = ".mp4"
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
             temp_file.write(media_content)
             temp_file_path = temp_file.name
 
@@ -180,6 +251,32 @@ async def upload_media_to_whatsapp(media_content: bytes, mime_type: str) -> str 
     finally:
         if temp_file_path and os.path.exists(temp_file_path):
             os.unlink(temp_file_path)
+
+async def send_avatar_image_from_base64(to: str, base64_data: str):
+    """Sends an image message from base64 data to WhatsApp."""
+    try:
+        import base64
+        image_data = base64.b64decode(base64_data)
+        media_id = await upload_media_to_whatsapp(image_data, "image/png")
+        
+        if media_id:
+            payload = {
+                "messaging_product": "whatsapp",
+                "to": to,
+                "type": "image",
+                "image": {"id": media_id}
+            }
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.post(FB_BASE_URL, headers=AUTH_HEADERS, json=payload)
+                response.raise_for_status()
+                logger.info(f"Avatar image sent to {to}")
+        else:
+            logger.error("Failed to upload avatar image to WhatsApp")
+            
+    except Exception as e:
+        logger.error(f"Error sending avatar image from base64: {e}")
+        raise
 
 # --- Webhook Handler ---
 
@@ -206,7 +303,30 @@ async def whatsapp_handler(request: Request, background: BackgroundTasks) -> Res
         #
         #
         # ✅ **THIS IS WHERE THE USER'S NAME IS EXTRACTED**
-        user_name = changes.get("contacts", [{}])[0].get("profile", {}).get("name", "there")
+        user_name = "there"  # Default fallback
+        
+        # Try to extract name from contacts array
+        contacts = changes.get("contacts", [])
+        if contacts and len(contacts) > 0:
+            contact = contacts[0]
+            # Try different possible locations for the name
+            user_name = (
+                contact.get("profile", {}).get("name") or
+                contact.get("name") or
+                contact.get("display_name") or
+                "there"
+            )
+        
+        # If still no name found, try to extract from message metadata
+        if user_name == "there":
+            user_name = (
+                message.get("profile", {}).get("name") or
+                message.get("name") or
+                "there"
+            )
+        
+        # Log the extracted name for debugging
+        logger.info(f"Extracted user name: '{user_name}' from phone: {from_number}")
         #
         #
 
@@ -264,6 +384,7 @@ async def process_whatsapp_message(message: dict, from_number: str, user_name: s
         
         response_text = agent_response["text"]
         buttons = agent_response.get("buttons", [])
+        avatar_data = agent_response.get("avatar_data", None)
 
         # --- Send Reply ---
         if should_respond_with_audio and text_to_speech:
@@ -271,17 +392,17 @@ async def process_whatsapp_message(message: dict, from_number: str, user_name: s
                 audio_bytes = await text_to_speech.synthesize(response_text)
                 media_id = await upload_media_to_whatsapp(audio_bytes, "audio/mpeg")
                 if media_id:
-                    await send_audio_message(from_number, media_id)
-                else: 
-                    await send_text_message(from_number, response_text)
+                    await send_audio_message(from_number, media_id)  # Actually send the audio
+                else: # Fallback to text
+                    await send_text_message(from_number, response_text, avatar_data)
             except Exception as e:
                 logger.error(f"[BG] TTS or audio upload failed: {e}")
-                await send_text_message(from_number, response_text)
+                await send_text_message(from_number, response_text, avatar_data) # Fallback to text
         
         elif buttons:
-            await send_button_message(from_number, response_text, buttons)
+            await send_button_message(from_number, response_text, buttons, avatar_data)
         else:
-            await send_text_message(from_number, response_text)
+            await send_text_message(from_number, response_text, avatar_data)
 
     except Exception as e:
         logger.exception("[BG] Unhandled exception in background task")

@@ -1,7 +1,7 @@
 import os
 from typing import Optional
 import requests
-from elevenlabs import generate, Voice, VoiceSettings
+from elevenlabs import ElevenLabs, Voice, VoiceSettings
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -19,6 +19,14 @@ class TextToSpeech:
     def __init__(self):
         """Initialize the TextToSpeech class and validate environment variables."""
         self._validate_env_vars()
+        self._client: Optional[ElevenLabs] = None
+
+    @property
+    def client(self) -> ElevenLabs:
+        """Get or create ElevenLabs client instance using singleton pattern."""
+        if self._client is None:
+            self._client = ElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
+        return self._client
 
     def _validate_env_vars(self) -> None:
         """Validate that all required environment variables are set."""
@@ -46,10 +54,9 @@ class TextToSpeech:
             raise ValueError("Input text exceeds maximum length of 5000 characters")
 
         try:
-            # Use the simple generate function from elevenlabs
+            # Use the new ElevenLabs API
             voice_id = os.getenv("ELEVENLABS_VOICE_ID")
             model = os.getenv("TTS_MODEL_NAME", "eleven_monolingual_v1")
-            api_key = os.getenv("ELEVENLABS_API_KEY")
             
             # Create voice settings
             voice_settings = VoiceSettings(
@@ -59,18 +66,12 @@ class TextToSpeech:
                 use_speaker_boost=True
             )
             
-            # Create voice object
-            voice = Voice(
-                voice_id=voice_id,
-                settings=voice_settings
-            )
-            
-            # Generate audio using the simple API
-            audio_bytes = generate(
+            # Generate audio using the new API
+            audio_bytes = self.client.text_to_speech.convert(
                 text=text,
-                voice=voice,
-                model=model,
-                api_key=api_key
+                voice_id=voice_id,
+                model_id=model,
+                voice_settings=voice_settings
             )
             
             if not audio_bytes:
