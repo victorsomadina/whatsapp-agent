@@ -482,8 +482,8 @@ class WhatsappAgent:
             
             # Image paths for each identity
             image_paths = {
-                "Toni": r"C:\Users\hp\Downloads\NPFPension\whatsapp-agent\ChatGPT Image Sep 18, 2025, 05_25_19 PM.png",
-                "Debby": r"C:\Users\hp\Downloads\NPFPension\whatsapp-agent\ChatGPT Image Sep 18, 2025, 05_25_41 PM.png"
+                "Toni": r"C:\Users\hp\Downloads\NPFPension\whatsapp-agent\ChatGPT Image Sep 19, 2025, 03_33_26 PM.png",
+                "Debby": r"C:\Users\hp\Downloads\NPFPension\whatsapp-agent\ChatGPT Image Sep 19, 2025, 03_24_43 PM.png"
             }
             
             image_path = image_paths.get(identity, image_paths["Toni"])  # Default to Toni
