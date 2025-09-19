@@ -277,43 +277,6 @@ async def send_avatar_image_from_base64(to: str, base64_data: str):
         logger.error(f"Error sending avatar image from base64: {e}")
         raise
 
-async def send_typing_on(to: str):
-    """Shows typing indicator on WhatsApp using the proper API format."""
-    try:
-        # Send the actual WhatsApp typing indicator
-        payload = {
-            "messaging_product": "whatsapp",
-            "recipient_type": "individual",
-            "to": to,
-            "type": "typing_on"
-        }
-        
-        async with httpx.AsyncClient() as client:
-            response = await client.post(FB_BASE_URL, headers=AUTH_HEADERS, json=payload)
-            response.raise_for_status()
-            logger.info(f"Typing indicator sent to {to}")
-            
-    except Exception as e:
-        logger.error(f"Error sending typing indicator: {e}")
-
-async def send_typing_off(to: str):
-    """Hides typing indicator using the proper API format."""
-    try:
-        # Send the typing_off action
-        payload = {
-            "messaging_product": "whatsapp",
-            "recipient_type": "individual",
-            "to": to,
-            "type": "typing_off"
-        }
-        
-        async with httpx.AsyncClient() as client:
-            response = await client.post(FB_BASE_URL, headers=AUTH_HEADERS, json=payload)
-            response.raise_for_status()
-            logger.info(f"Typing indicator turned off for {to}")
-            
-    except Exception as e:
-        logger.error(f"Error turning off typing indicator: {e}")
 
 # --- Webhook Handler ---
 
@@ -339,7 +302,7 @@ async def whatsapp_handler(request: Request, background: BackgroundTasks) -> Res
         
         #
         #
-        # ✅ **THIS IS WHERE THE USER'S NAME IS EXTRACTED**
+        # **THIS IS WHERE THE USER'S NAME IS EXTRACTED**
         user_name = "there"  # Default fallback
         
         # Try to extract name from contacts array
@@ -374,7 +337,6 @@ async def whatsapp_handler(request: Request, background: BackgroundTasks) -> Res
         logger.warning("Malformed or unexpected webhook payload received")
         return Response(status_code=200) # Still ACK to prevent FB from resending
 
-# --- Background Worker ---
 
 async def process_whatsapp_message(message: dict, from_number: str, user_name: str):
     """Full processing pipeline for an incoming message."""
@@ -415,11 +377,6 @@ async def process_whatsapp_message(message: dict, from_number: str, user_name: s
             await send_text_message(from_number, "I'm currently unavailable. Please try again later.")
             return
 
-        # Show typing indicator
-        try:
-            await send_typing_on(from_number)
-        except Exception as e:
-            logger.warning(f"Failed to show typing indicator: {e}")
 
         thread_id = from_number.replace("+", "")
         agent_response = await pension_agent.get_response(content_for_agent, thread_id)
@@ -429,29 +386,22 @@ async def process_whatsapp_message(message: dict, from_number: str, user_name: s
         avatar_data = agent_response.get("avatar_data", None)
 
         # --- Send Reply ---
-        try:
-            if should_respond_with_audio and text_to_speech:
-                try:
-                    audio_bytes = await text_to_speech.synthesize(response_text)
-                    media_id = await upload_media_to_whatsapp(audio_bytes, "audio/mpeg")
-                    if media_id:
-                        await send_audio_message(from_number, media_id)
-                    else: # Fallback to text
-                        await send_text_message(from_number, response_text, avatar_data)
-                except Exception as e:
-                    logger.error(f"[BG] TTS or audio upload failed: {e}")
-                    await send_text_message(from_number, response_text, avatar_data)
-            
-            elif buttons:
-                await send_button_message(from_number, response_text, buttons, avatar_data)
-            else:
-                await send_text_message(from_number, response_text, avatar_data)
-        finally:
-            # Hide typing indicator after sending response
+        if should_respond_with_audio and text_to_speech:
             try:
-                await send_typing_off(from_number)
+                audio_bytes = await text_to_speech.synthesize(response_text)
+                media_id = await upload_media_to_whatsapp(audio_bytes, "audio/mpeg")
+                if media_id:
+                    await send_audio_message(from_number, media_id)
+                else: # Fallback to text
+                    await send_text_message(from_number, response_text, avatar_data)
             except Exception as e:
-                logger.warning(f"Failed to hide typing indicator: {e}")
+                logger.error(f"[BG] TTS or audio upload failed: {e}")
+                await send_text_message(from_number, response_text, avatar_data)
+        
+        elif buttons:
+            await send_button_message(from_number, response_text, buttons, avatar_data)
+        else:
+            await send_text_message(from_number, response_text, avatar_data)
 
     except Exception as e:
         logger.exception("[BG] Unhandled exception in background task")
@@ -459,12 +409,6 @@ async def process_whatsapp_message(message: dict, from_number: str, user_name: s
             await send_text_message(from_number, "Something went wrong. Please try again later.")
         except Exception:
             pass # Avoid error loops
-        finally:
-            # Hide typing indicator even on error
-            try:
-                await send_typing_off(from_number)
-            except Exception:
-                pass # Avoid error loops
 
 # --- Health Check and Root Endpoints ---
 
