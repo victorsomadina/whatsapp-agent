@@ -10,10 +10,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import tempfile
 import json
-
-# Import the new NPF Pensions agent
 from agent import WhatsappAgent
-
 from speech_to_text import SpeechToText
 from text_to_speech import TextToSpeech
 
