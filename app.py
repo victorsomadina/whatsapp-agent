@@ -10,6 +10,9 @@ import asyncio
 from contextlib import asynccontextmanager
 import tempfile
 import json
+import time
+
+# Import the new NPF Pensions agent
 from agent import WhatsappAgent
 from speech_to_text import SpeechToText
 from text_to_speech import TextToSpeech
@@ -33,11 +36,17 @@ if not all([WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_VERIFY_TOKEN]):
 pension_agent: WhatsappAgent | None = None
 speech_to_text: SpeechToText | None = None
 text_to_speech: TextToSpeech | None = None
+inactivity_task: asyncio.Task | None = None
+
+# Session state tracking
+user_last_active: Dict[str, float] = {}
+inactivity_prompt_sent: Dict[str, bool] = {}
+terminated_sessions: Dict[str, bool] = {}  # Track terminated sessions
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage the lifecycle of the FastAPI app and initialize components."""
-    global pension_agent, speech_to_text, text_to_speech
+    global pension_agent, speech_to_text, text_to_speech, inactivity_task
     
     logger.info("Initializing NPF Pensions Agent and speech modules...")
     try:
@@ -47,10 +56,11 @@ async def lifespan(app: FastAPI):
         speech_to_text = SpeechToText()
         text_to_speech = TextToSpeech()
         
+        inactivity_task = asyncio.create_task(check_inactivity())
+        
         logger.info("All components initialized successfully!")
     except Exception as e:
         logger.error(f"Failed to initialize components: {e}")
-        # Nullify all on failure
         pension_agent = None
         speech_to_text = None
         text_to_speech = None
@@ -58,6 +68,12 @@ async def lifespan(app: FastAPI):
     yield
 
     logger.info("Cleaning up components...")
+    if inactivity_task:
+        inactivity_task.cancel()
+        try:
+            await inactivity_task
+        except asyncio.CancelledError:
+            logger.info("Inactivity checker task cancelled successfully.")
     if pension_agent:
         await pension_agent.cleanup()
 
@@ -72,40 +88,66 @@ app = FastAPI(
 FB_BASE_URL = f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
 AUTH_HEADERS = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
 
+async def check_inactivity():
+    """Periodically checks for inactive users and sends a prompt."""
+    logger.info("Inactivity checker started.")
+    while True:
+        try:
+            await asyncio.sleep(30)
+            current_time = time.time()
+            
+            user_ids = list(user_last_active.keys())
+
+            for user_id in user_ids:
+                # Skip if session is already terminated
+                if terminated_sessions.get(user_id, False):
+                    continue
+                    
+                last_time = user_last_active.get(user_id)
+                if last_time and (current_time - last_time > 60):  # 60-second timeout
+                    if not inactivity_prompt_sent.get(user_id):
+                        logger.info(f"User {user_id} is inactive. Sending prompt.")
+                        prompt_text = "It seems you have been inactive for a while. Do you want to end the session?"
+                        buttons = ["End Session", "Continue"]
+                        from_number = user_id 
+                        await send_button_message(from_number, prompt_text, buttons)
+                        inactivity_prompt_sent[user_id] = True
+                        # Set a timer for auto-termination if no response
+                        user_last_active[user_id] = current_time  # Update to current time for auto-termination check
+                    
+                    # Auto-terminate if no response to inactivity prompt after another 60 seconds
+                    elif inactivity_prompt_sent.get(user_id) and (current_time - last_time > 60):
+                        logger.info(f"Auto-terminating session for user {user_id} due to no response.")
+                        terminated_sessions[user_id] = True
+                        # Clean up tracking
+                        user_last_active.pop(user_id, None)
+                        inactivity_prompt_sent.pop(user_id, None)
+
+        except asyncio.CancelledError:
+            logger.info("Inactivity checker is shutting down.")
+            break
+        except Exception as e:
+            logger.error(f"Error in inactivity checker: {e}", exc_info=True)
+
 async def send_text_message(to: str, text: str, avatar_data: str = None):
     """Sends a simple text message with proper formatting and optional avatar."""
-    # Clean up the text formatting for WhatsApp
     formatted_text = text.replace('\\n', '\n')
     
-    # If avatar is provided, send image with caption
     if avatar_data:
         try:
-            # Upload the image first to get media ID
             import base64
             image_data = base64.b64decode(avatar_data)
             media_id = await upload_media_to_whatsapp(image_data, "image/png")
             
             if media_id:
-                # Send image with caption
-                payload = {
-                    "messaging_product": "whatsapp",
-                    "to": to,
-                    "type": "image",
-                    "image": {
-                        "id": media_id,
-                        "caption": formatted_text
-                    }
-                }
+                payload = {"messaging_product": "whatsapp", "to": to, "type": "image", "image": {"id": media_id, "caption": formatted_text}}
                 logger.info(f"Sending image with caption to {to}, media_id: {media_id}")
             else:
-                # Fallback to regular text message
                 payload = {"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": formatted_text}}
         except Exception as e:
             logger.error(f"Failed to send image with caption: {e}")
-            # Fallback to regular text message
             payload = {"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": formatted_text}}
     else:
-        # Regular text message without avatar
         payload = {"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": formatted_text}}
     
     async with httpx.AsyncClient() as client:
@@ -113,61 +155,41 @@ async def send_text_message(to: str, text: str, avatar_data: str = None):
             response = await client.post(FB_BASE_URL, headers=AUTH_HEADERS, json=payload)
             response.raise_for_status()
             logger.info(f"Text message sent to {to}")
-            logger.info(f"Response: {response.text}")
         except httpx.HTTPStatusError as e:
             logger.error(f"Error sending text message: {e.response.text}")
-            logger.error(f"Payload was: {payload}")
 
 async def send_button_message(to: str, body: str, buttons: List[str], avatar_data: str = None):
     """Sends an interactive message with up to 3 buttons."""
-    # Validate button titles length (WhatsApp limit: 20 characters)
     validated_buttons = []
-    for button in buttons[:3]:  # Max 3 buttons
+    for button in buttons[:3]:
         if len(button) > 20:
-            # Truncate and add ellipsis if too long
             truncated = button[:17] + "..."
             validated_buttons.append(truncated)
             logger.warning(f"Button title truncated: '{button}' -> '{truncated}'")
         else:
             validated_buttons.append(button)
     
-    # Build the interactive message payload
     interactive_payload = {
         "type": "button",
-        "body": {"text": body.replace('\\n', '\n')},  # Convert escaped newlines
+        "body": {"text": body.replace('\\n', '\n')},
         "action": {
-            "buttons": [
-                {"type": "reply", "reply": {"id": f"btn_{i}", "title": btn}}
-                for i, btn in enumerate(validated_buttons)
-            ]
+            "buttons": [{"type": "reply", "reply": {"id": f"btn_{i}", "title": btn}} for i, btn in enumerate(validated_buttons)]
         }
     }
     
-    # Add image header if avatar is provided
     if avatar_data:
         try:
-            # Upload the image first to get media ID
             import base64
             image_data = base64.b64decode(avatar_data)
             media_id = await upload_media_to_whatsapp(image_data, "image/png")
             
             if media_id:
-                interactive_payload["header"] = {
-                    "type": "image",
-                    "image": {"id": media_id}
-                }
+                interactive_payload["header"] = {"type": "image", "image": {"id": media_id}}
                 logger.info(f"Added image header to button message")
-            else:
-                logger.warning("Failed to upload avatar image for button message")
         except Exception as e:
             logger.error(f"Failed to embed avatar in button message: {e}")
     
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "interactive",
-        "interactive": interactive_payload
-    }
+    payload = {"messaging_product": "whatsapp", "to": to, "type": "interactive", "interactive": interactive_payload}
     async with httpx.AsyncClient() as client:
         try:
             response = await client.post(FB_BASE_URL, headers=AUTH_HEADERS, json=payload)
@@ -176,6 +198,50 @@ async def send_button_message(to: str, body: str, buttons: List[str], avatar_dat
         except httpx.HTTPStatusError as e:
             logger.error(f"Error sending button message: {e.response.text}")
             await send_text_message(to, body)
+
+async def send_list_message(to: str, data: Dict[str, any]):
+    """Sends an interactive list message with selectable options."""
+    try:
+        rows = []
+        for i, opt in enumerate(data["options"][:10]):
+            rows.append({
+                "id": f"opt_{i}",
+                "title": opt[:24],
+                "description": ""
+            })
+        
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "interactive",
+            "interactive": {
+                "type": "list",
+                "header": {"type": "text", "text": data["header"][:60]},
+                "body": {"text": data["body"][:1024]},
+                "action": {
+                    "button": data["button_text"][:20],
+                    "sections": [{
+                        "title": data["section_title"][:24],
+                        "rows": rows
+                    }]
+                }
+            }
+        }
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.post(FB_BASE_URL, headers=AUTH_HEADERS, json=payload)
+            response.raise_for_status()
+            logger.info(f"List message sent to {to} with {len(rows)} options")
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Error sending list message: {e.response.text}")
+        # Fallback to text message if list fails
+        fallback_text = f"{data['header']}\n\n{data['body']}\n\nOptions:\n"
+        for i, opt in enumerate(data["options"], 1):
+            fallback_text += f"{i}. {opt}\n"
+        await send_text_message(to, fallback_text)
+    except Exception as e:
+        logger.error(f"Unexpected error sending list message: {e}")
+        await send_text_message(to, f"{data['header']}\n\n{data['body']}")
 
 async def send_audio_message(to: str, media_id: str):
     """Sends an audio message using the uploaded media ID."""
@@ -214,21 +280,10 @@ async def upload_media_to_whatsapp(media_content: bytes, mime_type: str) -> str 
     upload_url = f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_NUMBER_ID}/media"
     temp_file_path = None
     try:
-        # Determine file suffix based on mime type
-        suffix = ".mp3"  # default
-        if mime_type.startswith("image/"):
-            if mime_type == "image/png":
-                suffix = ".png"
-            elif mime_type == "image/jpeg":
-                suffix = ".jpg"
-            elif mime_type == "image/gif":
-                suffix = ".gif"
-            else:
-                suffix = ".png"  # fallback
-        elif mime_type.startswith("audio/"):
-            suffix = ".mp3"
-        elif mime_type.startswith("video/"):
-            suffix = ".mp4"
+        suffix = ".tmp"
+        if mime_type == "image/png": suffix = ".png"
+        elif mime_type == "image/jpeg": suffix = ".jpg"
+        elif mime_type == "audio/mpeg": suffix = ".mp3"
         
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
             temp_file.write(media_content)
@@ -248,33 +303,6 @@ async def upload_media_to_whatsapp(media_content: bytes, mime_type: str) -> str 
         if temp_file_path and os.path.exists(temp_file_path):
             os.unlink(temp_file_path)
 
-async def send_avatar_image_from_base64(to: str, base64_data: str):
-    """Sends an image message from base64 data to WhatsApp."""
-    try:
-        import base64
-        image_data = base64.b64decode(base64_data)
-        media_id = await upload_media_to_whatsapp(image_data, "image/png")
-        
-        if media_id:
-            payload = {
-                "messaging_product": "whatsapp",
-                "to": to,
-                "type": "image",
-                "image": {"id": media_id}
-            }
-            
-            async with httpx.AsyncClient() as client:
-                response = await client.post(FB_BASE_URL, headers=AUTH_HEADERS, json=payload)
-                response.raise_for_status()
-                logger.info(f"Avatar image sent to {to}")
-        else:
-            logger.error("Failed to upload avatar image to WhatsApp")
-            
-    except Exception as e:
-        logger.error(f"Error sending avatar image from base64: {e}")
-        raise
-
-
 # --- Webhook Handler ---
 
 @app.api_route("/whatsapp", methods=["GET", "POST"])
@@ -291,53 +319,38 @@ async def whatsapp_handler(request: Request, background: BackgroundTasks) -> Res
         changes = data["entry"][0]["changes"][0]["value"]
         messages = changes.get("messages", [])
 
-        if not messages: # Ignore delivery receipts etc.
+        if not messages:
             return Response(status_code=200)
             
         message = messages[0]
         from_number = message["from"]
         
-        #
-        #
-        # **THIS IS WHERE THE USER'S NAME IS EXTRACTED**
-        user_name = "there"  # Default fallback
-        
-        # Try to extract name from contacts array
+        user_name = "there"
         contacts = changes.get("contacts", [])
-        if contacts and len(contacts) > 0:
-            contact = contacts[0]
-            # Try different possible locations for the name
-            user_name = (
-                contact.get("profile", {}).get("name") or
-                contact.get("name") or
-                contact.get("display_name") or
-                "there"
-            )
+        if contacts:
+            user_name = contacts[0].get("profile", {}).get("name", "there")
         
-        # If still no name found, try to extract from message metadata
-        if user_name == "there":
-            user_name = (
-                message.get("profile", {}).get("name") or
-                message.get("name") or
-                "there"
-            )
-        
-        # Log the extracted name for debugging
         logger.info(f"Extracted user name: '{user_name}' from phone: {from_number}")
-        #
-        #
-
-        # Schedule the heavy processing in the background
+        
         background.add_task(process_whatsapp_message, message, from_number, user_name)
-        return Response(status_code=200) # ACK instantly
+        return Response(status_code=200)
     except (KeyError, IndexError, json.JSONDecodeError):
         logger.warning("Malformed or unexpected webhook payload received")
-        return Response(status_code=200) # Still ACK to prevent FB from resending
+        return Response(status_code=200)
 
 
 async def process_whatsapp_message(message: dict, from_number: str, user_name: str):
     """Full processing pipeline for an incoming message."""
     try:
+        # Check if session is terminated and reactivate if user sends new message
+        if terminated_sessions.get(from_number, False):
+            logger.info(f"Reactivating terminated session for user {from_number}")
+            terminated_sessions[from_number] = False
+        
+        # Update user activity
+        user_last_active[from_number] = time.time()
+        inactivity_prompt_sent.pop(from_number, None)
+        
         message_type = message.get("type", "unknown")
         logger.info(f"[BG] Processing '{message_type}' from {from_number} ({user_name})")
 
@@ -347,9 +360,32 @@ async def process_whatsapp_message(message: dict, from_number: str, user_name: s
         if message_type == "text":
             content_for_agent = f'[name:{user_name}] {message["text"]["body"]}'
         
-        elif message_type == "interactive" and message["interactive"]["type"] == "button_reply":
-            button_title = message["interactive"]["button_reply"]["title"]
-            content_for_agent = f'[name:{user_name}] [User clicked button]: "{button_title}"'
+        elif message_type == "interactive":
+            interactive_type = message["interactive"]["type"]
+            if interactive_type == "button_reply":
+                button_title = message["interactive"]["button_reply"]["title"]
+            elif interactive_type == "list_reply":
+                button_title = message["interactive"]["list_reply"]["title"]
+            else:
+                await send_text_message(from_number, "I can only process text, voice messages, button clicks, and list selections.")
+                return
+            
+            # Handle session termination
+            if button_title == "End Session":
+                logger.info(f"User {from_number} requested session termination.")
+                terminated_sessions[from_number] = True
+                user_last_active.pop(from_number, None)
+                inactivity_prompt_sent.pop(from_number, None)
+                await send_text_message(from_number, "Your session has been ended. Send any message to start a new conversation.")
+                return
+            elif button_title == "Continue":
+                logger.info(f"User {from_number} chose to continue session.")
+                # Just update activity and continue processing
+                content_for_agent = f'[name:{user_name}] [User clicked button]: "Continue"'
+            else:
+                # Handle both button clicks and list selections
+                interaction_type = "clicked button" if interactive_type == "button_reply" else "selected from list"
+                content_for_agent = f'[name:{user_name}] [User {interaction_type}]: "{button_title}"'
 
         elif message_type == "audio":
             if not speech_to_text:
@@ -369,46 +405,47 @@ async def process_whatsapp_message(message: dict, from_number: str, user_name: s
             await send_text_message(from_number, "I can only process text, voice messages, and button clicks.")
             return
 
-        # --- Call Agent ---
         if not pension_agent:
             await send_text_message(from_number, "I'm currently unavailable. Please try again later.")
             return
 
-
         thread_id = from_number.replace("+", "")
         agent_response = await pension_agent.get_response(content_for_agent, thread_id)
         
-        response_text = agent_response["text"]
+        response_text = agent_response.get("text")
         buttons = agent_response.get("buttons", [])
+        list_data = agent_response.get("list")
         avatar_data = agent_response.get("avatar_data", None)
 
-        # --- Send Reply ---
         if should_respond_with_audio and text_to_speech:
             try:
                 audio_bytes = await text_to_speech.synthesize(response_text)
                 media_id = await upload_media_to_whatsapp(audio_bytes, "audio/mpeg")
                 if media_id:
                     await send_audio_message(from_number, media_id)
-                else: # Fallback to text
+                else:
                     await send_text_message(from_number, response_text, avatar_data)
             except Exception as e:
                 logger.error(f"[BG] TTS or audio upload failed: {e}")
                 await send_text_message(from_number, response_text, avatar_data)
         
+        elif list_data:
+            await send_list_message(from_number, list_data)
         elif buttons:
             await send_button_message(from_number, response_text, buttons, avatar_data)
-        else:
+        elif response_text:
             await send_text_message(from_number, response_text, avatar_data)
+        else:
+            await send_text_message(from_number, "I'm having trouble processing your request. Please try again.", avatar_data)
 
     except Exception as e:
         logger.exception("[BG] Unhandled exception in background task")
         try:
             await send_text_message(from_number, "Something went wrong. Please try again later.")
         except Exception:
-            pass # Avoid error loops
+            pass
 
 # --- Health Check and Root Endpoints ---
-
 @app.get("/")
 async def root():
     return {"message": "NPF Pensions WhatsApp Agent is running!"}
@@ -424,5 +461,5 @@ async def health():
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    port = int(os.getenv("PORT", 8080))
+    uvicorn.run(app, host="127.0.0.1", port=port)
