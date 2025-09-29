@@ -41,7 +41,7 @@ inactivity_task: asyncio.Task | None = None
 # Session state tracking
 user_last_active: Dict[str, float] = {}
 inactivity_prompt_sent: Dict[str, bool] = {}
-terminated_sessions: Dict[str, bool] = {}  # Track terminated sessions
+terminated_sessions: Dict[str, bool] = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
