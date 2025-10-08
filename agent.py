@@ -360,8 +360,8 @@ class WhatsappAgent:
         try:
             import base64, os
             image_paths = {
-                "Toni": r"C:\Users\hp\Downloads\NPFPension\whatsapp-agent\Gemini_Generated_Image_rkp2k2rkp2k2rkp2.png",
-                "Debby": r"C:\Users\hp\Downloads\NPFPension\whatsapp-agent\Gemini_Generated_Image_rkp2k2rkp2k2rkp2.png"
+                "Toni": os.path.join(os.path.dirname(__file__), 'Gemini_Generated_Image_rkp2k2rkp2k2rkp2.png'),
+                "Debby": os.path.join(os.path.dirname(__file__), 'Gemini_Generated_Image_rkp2k2rkp2k2rkp2.png')
             }
             image_path = image_paths.get(identity, image_paths["Toni"])
             if os.path.exists(image_path):
@@ -379,8 +379,8 @@ class WhatsappAgent:
         try:
             import base64, os, random
             image_data = [
-                {"path": r"C:\Users\dell\Documents\whatsapp-agent\Gemini_Generated_Image_rkp2k2rkp2k2rkp2.png", "name": "Debby"},
-                {"path": r"C:\Users\dell\Documents\whatsapp-agent\Gemini_Generated_Image_rkp2k2rkp2k2rkp2.png", "name": "Toni"}
+                {"path": os.path.join(os.path.dirname(__file__), 'Gemini_Generated_Image_rkp2k2rkp2k2rkp2.png'), "name": "Debby"},
+                {"path": os.path.join(os.path.dirname(__file__), 'Gemini_Generated_Image_rkp2k2rkp2k2rkp2.png'), "name": "Toni"}
             ]
             selected = random.choice(image_data)
             if os.path.exists(selected["path"]):
